@@ -18,6 +18,9 @@ class ImageGenerator(object):
         self.__batch_size = batch_size
         self.__image_channels = image_channels
         
+        self.__fade = False
+        self.__alpha = 0.0
+        
         self.__filenames = []
         
         self.__cached_bank = 0
@@ -39,6 +42,12 @@ class ImageGenerator(object):
     
     def set_images_size(self, size):
         self.__images_size = size
+        
+    def set_fade(self, fade):
+        self.__fade = fade
+        
+    def set_fade_alpha(self, alpha):
+        self.__alpha = alpha
 
     def get_batch(self):
         while not self.__cached_ready[self.__cached_bank]:
@@ -78,6 +87,13 @@ class ImageGenerator(object):
             img -= 1.
             if len(img.shape) == 2:
                 img = img[:,:,np.newaxis]
+            
+            if self.__fade:
+                img_downsized = cv2.resize(img, (img_size//2,)*2)
+                img_downsized = img_downsized.repeat(2, axis = 0).repeat(2, axis = 1)
+                
+                img = img*self.__alpha + img_downsized*(1.0 - self.__alpha)
+            
             result[i,] = img[:,:,:self.__image_channels]
         
         self.__cached_batch[self.__cached_bank] = result
@@ -116,7 +132,7 @@ class TensorBoardCallback(object):
         if model is not None:
             self.__preview_latent_noise = model.sample_latent_space(4)
     
-    def on_epoch_end(self, epoch : int, step : int, fade : bool, metrics_dict : dict):
+    def on_batch_end(self, epoch : int, step : int, fade : bool, metrics_dict : dict):
         self.__total_epochs += 1
         
         if self.__use_tensorboard:
@@ -139,10 +155,8 @@ class TensorBoardCallback(object):
             
             if self.__total_epochs % self.__tensorboard_generator_preview_save_interval == 0:
                 self.__write_generator_preview(step, fade)
-        
-        frame = None
-        if self.__total_epochs % self.__image_generator_preview_save_interval == 0 or\
-           self.__total_epochs % self.__frame_generator_preview_save_interval == 0:
+                
+        if self.__total_epochs % self.__frame_generator_preview_save_interval == 0:
             frame = self.__model.generator[step][int(fade)].predict(self.__generator_preview_vid_latent)[0]
             # [-1., 1.] -> [0, 255]
             frame = np.clip((frame + 1.)*127.5, 0, 255).astype(np.uint8)
@@ -152,11 +166,22 @@ class TensorBoardCallback(object):
             if frame.shape[2] == 1:
                 frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
                 
-        if self.__total_epochs % self.__frame_generator_preview_save_interval == 0:
             self.__generator_preview_vid.write(frame[:,:,::-1])
             
         if self.__total_epochs % self.__image_generator_preview_save_interval == 0:
+            frame = self.__model.generator[step][int(fade)].predict(self.__model.sample_latent_space(1))[0]
+            # [-1., 1.] -> [0, 255]
+            frame = np.clip((frame + 1.)*127.5, 0, 255).astype(np.uint8)
+            frame = cv2.resize(frame, (512, 512), interpolation=cv2.INTER_NEAREST)
+            if len(frame.shape) == 2:
+                frame = frame[:,:,np.newaxis]
+            if frame.shape[2] == 1:
+                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                
             cv2.imwrite(os.path.join('./gen', self.__datetime_str , f'{2*step - int(fade):03d}_{epoch:06d}.jpg'), frame[:,:,::-1])
+    
+    def on_epoch_end(self, step : int, fade : bool):
+        self.__model.generator[step][int(fade)].save(f'./model/generator_cats_{step}_{int(fade)}.h5')
         
     def on_fit_end(self):
         self.__generator_preview_vid.release()

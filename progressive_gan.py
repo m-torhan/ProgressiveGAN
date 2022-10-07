@@ -8,6 +8,7 @@ import numpy as np
 
 from time import perf_counter
 import traceback
+from functools import partial
 
 from losses import *
 from custom_layers import *
@@ -73,30 +74,38 @@ class ProgressiveGAN(object):
         
         return normal_sample/np.sqrt((normal_sample**2).sum(axis=3))[:,:,:,np.newaxis]
     
-    def __train_models(self, step : int, fade : bool, image_generator : ImageGenerator, epochs_per_step : int =32, discriminator_train_per_gan_train : int =5, tensorboard_callback=None):
-        generator       = self.__generator[step][int(fade)]
-        discriminator   = self.__discriminator[step][int(fade)]
-        gan             = self.__gan[step][int(fade)]
+    def __train_models(self, step : int, fade : bool, image_generator : ImageGenerator, batches_per_step : int =32, discriminator_train_per_gan_train : int =5, tensorboard_callback=None):
+        generator           = self.__generator[step][int(fade)]
+        discriminator       = self.__discriminator_gp[step][int(fade)]
+        gan                 = self.__gan[step][int(fade)]
         
-        d_loss_total = .0
         g_loss_total = .0
+        d_loss_total = .0
+        d_loss_generated_total = .0
+        d_loss_real_total = .0
+        d_loss_gradient_penalty_total = .0
         
-        for epoch in range(epochs_per_step):
+        image_generator.set_fade(fade)
+        
+        for epoch in range(batches_per_step):
             # adjust fade in parameter
             if fade:
                 for model in (generator, discriminator, gan):
                     for layer in model.layers:
                         if isinstance(layer, WeightedSum):
-                            K.set_value(layer.alpha, epoch/epochs_per_step)
+                            K.set_value(layer.alpha, epoch/batches_per_step)
+                
+                image_generator.set_fade_alpha(epoch/batches_per_step)
                 
             # train discriminator
             d_loss_generated = 0.
             d_loss_real = 0.
+            d_loss_gradient_penalty = 0.
             
             for _ in range(discriminator_train_per_gan_train):
                 latent_noise = self.sample_latent_space(image_generator.batch_size)
 
-                generated_images = generator.predict(latent_noise)
+                # generated_images = generator.predict(latent_noise)
                 real_images = image_generator.get_batch()
                 
                 generated_labels = -1. * np.ones((image_generator.batch_size, 1))
@@ -111,16 +120,16 @@ class ProgressiveGAN(object):
                 generated_labels += .1 * np.random.normal(0, 1, generated_labels.shape)
                 real_labels += .1 * np.random.normal(0, 1, real_labels.shape)
                 
-                loss = discriminator.train_on_batch(generated_images, generated_labels)
-                d_loss_generated += loss
-                
-                loss = discriminator.train_on_batch(real_images, real_labels)
-                d_loss_real += loss
+                loss = discriminator.train_on_batch([real_images, latent_noise], [real_labels, generated_labels, dummy_labels])
+                d_loss_real += loss[0]
+                d_loss_generated += loss[1]
+                d_loss_gradient_penalty += loss[2]
             
             d_loss_generated /= discriminator_train_per_gan_train
             d_loss_real /= discriminator_train_per_gan_train
+            d_loss_gradient_penalty /= discriminator_train_per_gan_train
             
-            d_loss = (d_loss_generated + d_loss_real)/2
+            d_loss = (d_loss_generated + d_loss_real + d_loss_gradient_penalty)/2
             
             # train generator
             latent_noise = self.sample_latent_space(image_generator.batch_size)
@@ -130,16 +139,25 @@ class ProgressiveGAN(object):
 
             g_loss = gan.train_on_batch(latent_noise, misleading_labels)
             
-            d_loss_total += d_loss
-            g_loss_total += g_loss
+            g_loss_total                    += g_loss
+            d_loss_total                    += d_loss
+            d_loss_generated_total          += d_loss_generated
+            d_loss_real_total               += d_loss_real
+            d_loss_gradient_penalty_total   += d_loss_gradient_penalty
 
-            if epoch + 1 < epochs_per_step:
-                self.__print_fit_progress(self.__steps[step], step, fade, epoch + 1, epochs_per_step, d_loss, g_loss)
+            if epoch + 1 < batches_per_step:
+                self.__print_fit_progress(self.__steps[step], step, fade, epoch + 1, batches_per_step,
+                                          g_loss,
+                                          d_loss,
+                                          d_loss_generated, d_loss_real, d_loss_gradient_penalty)
             else:
-                self.__print_fit_progress(self.__steps[step], step, fade, epoch + 1, epochs_per_step, d_loss_total/epochs_per_step, g_loss_total/epochs_per_step)
+                self.__print_fit_progress(self.__steps[step], step, fade, epoch + 1, batches_per_step,
+                                          g_loss_total/batches_per_step,
+                                          d_loss_total/batches_per_step,
+                                          d_loss_generated_total/batches_per_step, d_loss_real_total/batches_per_step, d_loss_gradient_penalty_total/batches_per_step)
 
             if tensorboard_callback is not None:
-                tensorboard_callback.on_epoch_end(
+                tensorboard_callback.on_batch_end(
                     epoch, step, fade,
                     {'loss': {      #'d_loss_generated' : d_loss_generated,
                                     #'d_loss_real' : d_loss_real,
@@ -147,25 +165,31 @@ class ProgressiveGAN(object):
                                     'g_loss': g_loss}})
             
             self.__total_epochs += 1
-    
-    def fit(self, image_generator : ImageGenerator, epochs_per_step : (int | list) =32, discriminator_train_per_gan_train=5, tensorboard_callback=None):
+        
+        tensorboard_callback.on_epoch_end(step, fade)
+        
+        # self.__discriminator_optimizer.learning_rate.assign(self.__discriminator_optimizer.learning_rate * .8)
+        # if self.__discriminator_optimizer != self.__gan_optimizer:
+        #     self.__gan_optimizer.learning_rate.assign(self.__gan_optimizer.learning_rate * .8)
+            
+    def fit(self, image_generator : ImageGenerator, batches_per_step : (int | list) =32, discriminator_train_per_gan_train=5, tensorboard_callback=None):
         try:
-            if isinstance(epochs_per_step, int):
-                epochs_per_step = [epochs_per_step for _ in range(len(self.__steps))]
+            if isinstance(batches_per_step, int):
+                batches_per_step = [batches_per_step for _ in range(len(self.__steps))]
                 
             image_generator.set_images_size(self.__steps[0])
             
             self.__print_fit_progress_header()
-            self.__train_models(step=0, fade=False, image_generator=image_generator, epochs_per_step=epochs_per_step[0], discriminator_train_per_gan_train=discriminator_train_per_gan_train, tensorboard_callback=tensorboard_callback)
+            self.__train_models(step=0, fade=False, image_generator=image_generator, batches_per_step=batches_per_step[0], discriminator_train_per_gan_train=discriminator_train_per_gan_train, tensorboard_callback=tensorboard_callback)
 
             for step in range(1, len(self.__steps)):
                 img_size = self.__steps[step]
                 
                 image_generator.set_images_size(img_size)
                 
-                self.__train_models(step=step, fade=True, image_generator=image_generator, epochs_per_step=epochs_per_step[step], discriminator_train_per_gan_train=discriminator_train_per_gan_train, tensorboard_callback=tensorboard_callback)
+                self.__train_models(step=step, fade=True, image_generator=image_generator, batches_per_step=batches_per_step[step], discriminator_train_per_gan_train=discriminator_train_per_gan_train, tensorboard_callback=tensorboard_callback)
                 
-                self.__train_models(step=step, fade=False, image_generator=image_generator, epochs_per_step=epochs_per_step[step], discriminator_train_per_gan_train=discriminator_train_per_gan_train, tensorboard_callback=tensorboard_callback)
+                self.__train_models(step=step, fade=False, image_generator=image_generator, batches_per_step=batches_per_step[step], discriminator_train_per_gan_train=discriminator_train_per_gan_train, tensorboard_callback=tensorboard_callback)
                 
         except:
             traceback.print_exc()
@@ -180,9 +204,9 @@ class ProgressiveGAN(object):
             layer.trainable = value
     
     def __print_fit_progress_header(self):
-        print('| image size       | step | fade | epoch            | time     | d_loss                           | g_loss                           |', end='')
+        print('| image size       | step | fade | epoch            | time     | g_loss                           | d_loss                           | d_loss_generated                 | d_loss_real                      | d_loss_gradient_penalty          |', end='')
     
-    def __print_fit_progress(self, img_size, step, fade, epoch, total_epochs, d_loss, g_loss):
+    def __print_fit_progress(self, img_size, step, fade, epoch, total_epochs, g_loss, d_loss, d_loss_generated, d_loss_real, d_loss_gradient_penalty):
         if epoch == 1:
             self.__timer = perf_counter()
             print()
@@ -213,7 +237,7 @@ class ProgressiveGAN(object):
         
         epoch_str = f'{epoch} / {total_epochs}'
     
-        print(f'\r| {img_size_str:>16s} | {step:4d} | {int(fade):4d} | {epoch_str:>16s} | {time_str:>8s} | {d_loss:32f} | {g_loss:32f} |', end='')
+        print(f'\r| {img_size_str:>16s} | {step:4d} | {int(fade):4d} | {epoch_str:>16s} | {time_str:>8s} | {g_loss:32f} | {d_loss:32f} | {d_loss_generated:32f} | {d_loss_real:32f} | {d_loss_gradient_penalty:32f} | ', end='')
 
     def __init_generator(self):
         kernel_initializer = keras.initializers.RandomNormal(stddev=0.02)
@@ -290,11 +314,41 @@ class ProgressiveGAN(object):
         
         return [new_generator, new_generator_fade]
 
+    def __add_gradient_penalty_to_discriminator(self, discriminator, generator, img_size):
+        self.__set_trainable(generator, False)
+        
+        latent_input = Input((1, 1, self.__latent_dim))
+        
+        real_img = Input((img_size, img_size, self.__image_channels))
+        fake_img = generator(latent_input)
+        
+        real_predict = discriminator(real_img)
+        fake_predict = discriminator(fake_img)
+        
+        interpolated_img = RandomWeightedAverage()([real_img, fake_img])
+        
+        interpolated_predict = discriminator(interpolated_img)
+        
+        partial_gp_loss = partial(gradient_penalty_loss, interpolated_samples=interpolated_img)
+        partial_gp_loss.__name__ = 'gradient_penalty_loss'
+        
+        discriminator_gp = keras.Model(inputs=[real_img, latent_input], outputs=[real_predict, fake_predict, interpolated_predict],
+                                       name=f'discriminator_gp_{img_size}x{img_size}')
+        
+        discriminator_gp.compile(optimizer=self.__discriminator_optimizer,
+                                 loss=[wasserstein_loss, wasserstein_loss, partial_gp_loss],
+                                 loss_weights=[1, 1, 10])
+        
+        self.__set_trainable(generator, True)
+        
+        return discriminator_gp
+
     def __init_discriminator(self):
         kernel_initializer = keras.initializers.RandomNormal(stddev=0.02)
-        kernel_constraint = keras.constraints.MaxNorm(1.)
+        kernel_constraint = None #  keras.constraints.MaxNorm(1.)
         
         self.__discriminator = []
+        self.__discriminator_gp = []
         
         discriminator_input = x = Input((self.__initial_image_size, self.__initial_image_size, self.__image_channels))
 
@@ -326,19 +380,22 @@ class ProgressiveGAN(object):
         
         x = Dense(1)(x)
 
-        discriminator = keras.Model(discriminator_input, x, name=f'discriminator_{self.__initial_image_size}x{self.__initial_image_size}')
+        discriminator = keras.Model(discriminator_input, x,
+                                    name=f'discriminator_{self.__initial_image_size}x{self.__initial_image_size}')
         
-        discriminator.compile(optimizer=self.__discriminator_optimizer, loss=wasserstein_loss)
+        discriminator_gp = self.__add_gradient_penalty_to_discriminator(discriminator, self.__generator[0][0], self.__initial_image_size)
         
         self.__discriminator.append([discriminator, discriminator])
+        self.__discriminator_gp.append([discriminator_gp, discriminator_gp])
 
-        for _ in range(1, len(self.__steps)):
-            next_discriminators = self.__add_discriminator_block(self.__discriminator[-1][0])
+        for i in range(1, len(self.__steps)):
+            next_discriminators, next_discriminators_gp = self.__add_discriminator_block(i, self.__discriminator[-1][0])
             self.__discriminator.append(next_discriminators)
+            self.__discriminator_gp.append(next_discriminators_gp)
     
-    def __add_discriminator_block(self, discriminator : keras.Model):
+    def __add_discriminator_block(self, index, discriminator : keras.Model):
         kernel_initializer = keras.initializers.RandomNormal(stddev=0.02)
-        kernel_constraint = keras.constraints.MaxNorm(1.)
+        kernel_constraint = None # keras.constraints.MaxNorm(1.)
         
         discriminator_input_shape = discriminator.input.shape
         new_discriminator_input_shape = (discriminator_input_shape[-3] << 1, discriminator_input_shape[-2] << 1, discriminator_input_shape[-1])
@@ -363,7 +420,7 @@ class ProgressiveGAN(object):
             
         new_discriminator = keras.Model(new_discriminator_input, x, name=f'discriminator_{output_image_size}x{output_image_size}')
         
-        new_discriminator.compile(optimizer=self.__discriminator_optimizer, loss=wasserstein_loss)
+        new_discriminator_gp = self.__add_gradient_penalty_to_discriminator(new_discriminator, self.__generator[index][0], output_image_size)
         
         x = AveragePooling2D()(new_discriminator_input)
         x = discriminator.layers[1](x)  # 1x1 conv
@@ -377,29 +434,31 @@ class ProgressiveGAN(object):
             
         new_discriminator_fade = keras.Model(new_discriminator_input, x, name=f'discriminator_fade_{output_image_size}x{output_image_size}')
         
-        new_discriminator_fade.compile(optimizer=self.__discriminator_optimizer, loss=wasserstein_loss)
+        new_discriminator_gp_fade = self.__add_gradient_penalty_to_discriminator(new_discriminator_fade, self.__generator[index][1], output_image_size)
         
-        return [new_discriminator, new_discriminator_fade]
+        return [new_discriminator, new_discriminator_fade], [new_discriminator_gp, new_discriminator_gp_fade]
     
     def __init_gan(self):
         self.__gan = []
         
-        for generators, discirminators in zip(self.__generator, self.__discriminator):
+        for generators, discriminators in zip(self.__generator, self.__discriminator):
             # straight-through model
-            discirminators[0].trainable = False
+            self.__set_trainable(discriminators[0], False)
+            self.__set_trainable(generators[0], True)
             
             gan = keras.Sequential(name=f'gan_{generators[0].output.shape[1]}x{generators[0].output.shape[1]}')
             gan.add(generators[0])
-            gan.add(discirminators[0])
+            gan.add(discriminators[0])
             
             gan.compile(loss=wasserstein_loss, optimizer=self.__gan_optimizer)
             
             # fade-in model
-            discirminators[1].trainable = False
+            self.__set_trainable(discriminators[1], False)
+            self.__set_trainable(generators[1], True)
             
             gan_fade = keras.Sequential(name=f'gan_fade_{generators[0].output.shape[1]}x{generators[0].output.shape[1]}')
             gan_fade.add(generators[1])
-            gan_fade.add(discirminators[1])
+            gan_fade.add(discriminators[1])
             
             gan_fade.compile(loss=wasserstein_loss, optimizer=self.__gan_optimizer)
             

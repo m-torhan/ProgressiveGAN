@@ -1,5 +1,5 @@
 # ProgressiveGAN
-Implementation of progressive training of GAN in tensorflow
+Implementation of progressive training of GAN using tensorflow.
 
 Results for mnists dataset (32x32):</br>
 <img src="results/mnist/0.jpg" alt="0" style="width:64px;"/>
