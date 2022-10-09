@@ -12,11 +12,12 @@ import threading
 from random import sample
 
 class ImageGenerator(object):
-    def __init__(self, images_folder_path, initial_images_size=4, batch_size=32, image_channels=3):
+    def __init__(self, images_folder_path, initial_images_size=4, batch_size=32, image_channels=3, fade=False):
         self.__images_folder_path = images_folder_path
         self.__images_size = initial_images_size
         self.__batch_size = batch_size
         self.__image_channels = image_channels
+        self.__fade_override = fade
         
         self.__fade = False
         self.__alpha = 0.0
@@ -88,7 +89,7 @@ class ImageGenerator(object):
             if len(img.shape) == 2:
                 img = img[:,:,np.newaxis]
             
-            if self.__fade:
+            if self.__fade_override and self.__fade:
                 img_downsized = cv2.resize(img, (img_size//2,)*2)
                 img_downsized = img_downsized.repeat(2, axis = 0).repeat(2, axis = 1)
                 

@@ -11,4 +11,7 @@ Results for mnists dataset (32x32):</br>
 <img src="results/mnist/6.jpg" alt="6" style="width:64px;"/>
 <img src="results/mnist/7.jpg" alt="7" style="width:64px;"/>
 <img src="results/mnist/8.jpg" alt="8" style="width:64px;"/>
-<img src="results/mnist/9.jpg" alt="9" style="width:64px;"/>
+<img src="results/mnist/9.jpg" alt="9" style="width:64px;"/></br>
+Training preview:
+</br>
+<img src="results/mnist/training.gif" alt="0" style="width:128px;"/>

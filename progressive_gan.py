@@ -240,8 +240,8 @@ class ProgressiveGAN(object):
         print(f'\r| {img_size_str:>16s} | {step:4d} | {int(fade):4d} | {epoch_str:>16s} | {time_str:>8s} | {g_loss:32f} | {d_loss:32f} | {d_loss_generated:32f} | {d_loss_real:32f} | {d_loss_gradient_penalty:32f} | ', end='')
 
     def __init_generator(self):
-        kernel_initializer = keras.initializers.RandomNormal(stddev=0.02)
-        kernel_constraint = keras.constraints.MaxNorm(1.)
+        kernel_initializer = keras.initializers.HeNormal()
+        kernel_constraint = None # keras.constraints.MaxNorm(1.)
         
         self.__generator = []
         
@@ -283,8 +283,8 @@ class ProgressiveGAN(object):
             self.__generator.append(next_generators)
     
     def __add_generator_block(self, generator : keras.Model):
-        kernel_initializer = keras.initializers.RandomNormal(stddev=0.02)
-        kernel_constraint = keras.constraints.MaxNorm(1.)
+        kernel_initializer = keras.initializers.HeNormal()
+        kernel_constraint = None # keras.constraints.MaxNorm(1.)
         
         prev_block_end = generator.layers[-2].output
         
@@ -344,7 +344,7 @@ class ProgressiveGAN(object):
         return discriminator_gp
 
     def __init_discriminator(self):
-        kernel_initializer = keras.initializers.RandomNormal(stddev=0.02)
+        kernel_initializer = keras.initializers.HeNormal()
         kernel_constraint = None #  keras.constraints.MaxNorm(1.)
         
         self.__discriminator = []
@@ -394,7 +394,7 @@ class ProgressiveGAN(object):
             self.__discriminator_gp.append(next_discriminators_gp)
     
     def __add_discriminator_block(self, index, discriminator : keras.Model):
-        kernel_initializer = keras.initializers.RandomNormal(stddev=0.02)
+        kernel_initializer = keras.initializers.HeNormal()
         kernel_constraint = None # keras.constraints.MaxNorm(1.)
         
         discriminator_input_shape = discriminator.input.shape
