@@ -107,7 +107,7 @@ class ProgressiveGAN(object):
             # adjust fade in parameter
             alpha = 0
             if fade:
-                alpha = epoch/batches_per_step
+                alpha = epoch/(batches_per_step + epoch_offset)
                 for model in (generator, discriminator, gan):
                     for layer in model.layers:
                         if isinstance(layer, WeightedSum):
@@ -176,7 +176,7 @@ class ProgressiveGAN(object):
                                           d_loss_total/batches_per_step,
                                           d_loss_generated_total/batches_per_step, d_loss_real_total/batches_per_step, d_loss_gradient_penalty_total/batches_per_step)
 
-            if (epoch + 1) % checkpoint_save_interval == 0:
+            if (epoch + 1) % checkpoint_save_interval == 0 and epoch > epoch_offset:
                 fit_checkpoint = FitCheckpoint(
                     {'batches_per_step': batches_per_step,
                      'discriminator_train_per_gan_train': discriminator_train_per_gan_train,
@@ -363,7 +363,7 @@ class ProgressiveGAN(object):
         img_size_str = ''
         
         if alpha > 0:
-            img_size = f'{alpha:.2f} '
+            img_size_str = f'{alpha:.2f} '
             
         if fade:
             img_size_str += f'{img_size//2} -> {img_size}'
