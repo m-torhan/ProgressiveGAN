@@ -52,8 +52,8 @@ class MinibatchStdev(Layer):
         return tuple(input_shape)
     
 class RandomWeightedAverage(Layer):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, **kwargs):
+        super(RandomWeightedAverage, self).__init__(**kwargs)
     
     def call(self, inputs):
         alpha = K.random_uniform(K.shape(inputs[0])[:1])

@@ -8,8 +8,40 @@ import os
 import datetime
 from time import sleep
 import threading
+import json
 
 from random import sample
+
+class FitCheckpoint(object):
+    def __init__(self, fit_params, fit_progress):
+        self.__fit_params = fit_params
+        self.__fit_progress = fit_progress
+    
+    @property
+    def fit_params(self):
+        return self.__fit_params
+    
+    @property
+    def fit_progress(self):
+        return self.__fit_progress
+    
+    def save(self, path):
+        if not os.path.isdir(path):
+            os.mkdir(path)
+
+        with open(os.path.join(path, 'fit_params.json'), 'w') as fit_params_file:
+            json.dump(self.__fit_params, fit_params_file)
+        with open(os.path.join(path, 'fit_progress.json'), 'w') as fit_progress_file:
+            json.dump(self.__fit_progress, fit_progress_file)
+            
+    @classmethod
+    def load(self, path):
+        with open(os.path.join(path, 'fit_params.json'), 'r') as fit_params_file:
+            fit_params = json.load(fit_params_file)
+        with open(os.path.join(path, 'fit_progress.json'), 'r') as fit_progress_file:
+            fit_progress = json.load(fit_progress_file)
+        
+        return FitCheckpoint(fit_params, fit_progress)
 
 class ImageGenerator(object):
     def __init__(self, images_folder_path, initial_images_size=4, batch_size=32, image_channels=3, fade=False):

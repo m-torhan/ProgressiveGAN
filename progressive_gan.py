@@ -9,6 +9,7 @@ import numpy as np
 from time import perf_counter
 import traceback
 from functools import partial
+import json
 
 from losses import *
 from custom_layers import *
@@ -29,13 +30,16 @@ class ProgressiveGAN(object):
 
     __gan                       : keras.Model
 
-    def __init__(self, latent_dim : int =128, initial_image_size : int =4, final_image_size : int =512, image_channels : int =3, gan_optimizer : (str | keras.optimizers.Optimizer) ='adam', discriminator_optimizer : (str | keras.optimizers.Optimizer) ='adam'):
+    def __init__(self, latent_dim : int =128, initial_image_size : int =4, final_image_size : int =512, image_channels : int =3,
+                 gan_optimizer : (str | keras.optimizers.Optimizer) ='adam', discriminator_optimizer : (str | keras.optimizers.Optimizer) ='adam'):
         self.__latent_dim = latent_dim
         self.__initial_image_size = initial_image_size
         self.__final_image_size = final_image_size
         self.__image_channels = image_channels
         self.__gan_optimizer = gan_optimizer
         self.__discriminator_optimizer = discriminator_optimizer
+        
+        self.__checkpoint_idx = 0
 
         self.__steps = []
         
@@ -46,14 +50,15 @@ class ProgressiveGAN(object):
         
         self.__total_epochs = 0
 
-        self.__generator = None
-        self.__discriminator = None
-        self.__gan = None
+        self.__generator = []
+        self.__discriminator = []
+        self.__discriminator_gp = []
+        self.__gan = []
 
         self.__init_generator()
         self.__init_discriminator()
         self.__init_gan()
-        
+    
         self.__timer = perf_counter()
     
     @property
@@ -74,7 +79,8 @@ class ProgressiveGAN(object):
         
         return normal_sample/np.sqrt((normal_sample**2).sum(axis=3))[:,:,:,np.newaxis]
     
-    def __train_models(self, step : int, fade : bool, image_generator : ImageGenerator, batches_per_step : int =32, discriminator_train_per_gan_train : int =5, tensorboard_callback=None):
+    def __train_models(self, step : int, fade : bool, image_generator : ImageGenerator, batches_per_step : int =32, discriminator_train_per_gan_train : int =5,
+                       checkpoint_save_interval=1000, tensorboard_callback=None, fit_checkpoint : FitCheckpoint =None):
         generator           = self.__generator[step][int(fade)]
         discriminator       = self.__discriminator_gp[step][int(fade)]
         gan                 = self.__gan[step][int(fade)]
@@ -85,17 +91,29 @@ class ProgressiveGAN(object):
         d_loss_real_total = .0
         d_loss_gradient_penalty_total = .0
         
+        epoch_offset = 0
+        
+        if fit_checkpoint is not None:
+            g_loss_total                    = fit_checkpoint.fit_progress['g_loss_total']
+            d_loss_total                    = fit_checkpoint.fit_progress['d_loss_total']
+            d_loss_generated_total          = fit_checkpoint.fit_progress['d_loss_generated_total']
+            d_loss_real_total               = fit_checkpoint.fit_progress['d_loss_real_total']
+            d_loss_gradient_penalty_total   = fit_checkpoint.fit_progress['d_loss_gradient_penalty_total']
+            epoch_offset                    = fit_checkpoint.fit_progress['epoch']
+        
         image_generator.set_fade(fade)
         
-        for epoch in range(batches_per_step):
+        for epoch in range(epoch_offset, batches_per_step + epoch_offset):
             # adjust fade in parameter
+            alpha = 0
             if fade:
+                alpha = epoch/batches_per_step
                 for model in (generator, discriminator, gan):
                     for layer in model.layers:
                         if isinstance(layer, WeightedSum):
-                            K.set_value(layer.alpha, epoch/batches_per_step)
+                            K.set_value(layer.alpha, alpha)
                 
-                image_generator.set_fade_alpha(epoch/batches_per_step)
+                image_generator.set_fade_alpha(alpha)
                 
             # train discriminator
             d_loss_generated = 0.
@@ -146,16 +164,37 @@ class ProgressiveGAN(object):
             d_loss_gradient_penalty_total   += d_loss_gradient_penalty
 
             if epoch + 1 < batches_per_step:
-                self.__print_fit_progress(self.__steps[step], step, fade, epoch + 1, batches_per_step,
+                self.__print_fit_progress(self.__steps[step], step, fade, epoch + 1, batches_per_step + epoch_offset,
+                                          alpha,
                                           g_loss,
                                           d_loss,
                                           d_loss_generated, d_loss_real, d_loss_gradient_penalty)
             else:
-                self.__print_fit_progress(self.__steps[step], step, fade, epoch + 1, batches_per_step,
+                self.__print_fit_progress(self.__steps[step], step, fade, epoch + 1, batches_per_step + epoch_offset,
+                                          alpha,
                                           g_loss_total/batches_per_step,
                                           d_loss_total/batches_per_step,
                                           d_loss_generated_total/batches_per_step, d_loss_real_total/batches_per_step, d_loss_gradient_penalty_total/batches_per_step)
 
+            if (epoch + 1) % checkpoint_save_interval == 0:
+                fit_checkpoint = FitCheckpoint(
+                    {'batches_per_step': batches_per_step,
+                     'discriminator_train_per_gan_train': discriminator_train_per_gan_train,
+                     'checkpoint_save_interval': checkpoint_save_interval },
+                    {'step': step,
+                     'fade': fade,
+                     'epoch': epoch,
+                     'g_loss_total': g_loss_total,
+                     'd_loss_total': d_loss_total,
+                     'd_loss_generated_total': d_loss_generated_total,
+                     'd_loss_real_total': d_loss_real_total,
+                     'd_loss_gradient_penalty_total': d_loss_gradient_penalty_total})
+
+                fit_checkpoint.save(f'./fit_checkpoints/checkpoint_{self.__checkpoint_idx}')
+                self.save(f'./model/model_checkpoint_{self.__checkpoint_idx}')
+                
+                self.__checkpoint_idx ^= 1
+            
             if tensorboard_callback is not None:
                 tensorboard_callback.on_batch_end(
                     epoch, step, fade,
@@ -172,30 +211,122 @@ class ProgressiveGAN(object):
         # if self.__discriminator_optimizer != self.__gan_optimizer:
         #     self.__gan_optimizer.learning_rate.assign(self.__gan_optimizer.learning_rate * .8)
             
-    def fit(self, image_generator : ImageGenerator, batches_per_step : (int | list) =32, discriminator_train_per_gan_train=5, tensorboard_callback=None):
+    def fit(self, image_generator : ImageGenerator, batches_per_step : int =32, discriminator_train_per_gan_train=5, checkpoint_save_interval=1000, tensorboard_callback=None):
         try:
-            if isinstance(batches_per_step, int):
-                batches_per_step = [batches_per_step for _ in range(len(self.__steps))]
-                
             image_generator.set_images_size(self.__steps[0])
             
             self.__print_fit_progress_header()
-            self.__train_models(step=0, fade=False, image_generator=image_generator, batches_per_step=batches_per_step[0], discriminator_train_per_gan_train=discriminator_train_per_gan_train, tensorboard_callback=tensorboard_callback)
+            self.__train_models(step=0, fade=False, image_generator=image_generator, batches_per_step=batches_per_step,
+                                discriminator_train_per_gan_train=discriminator_train_per_gan_train,
+                                checkpoint_save_interval=checkpoint_save_interval, tensorboard_callback=tensorboard_callback)
 
             for step in range(1, len(self.__steps)):
                 img_size = self.__steps[step]
                 
                 image_generator.set_images_size(img_size)
                 
-                self.__train_models(step=step, fade=True, image_generator=image_generator, batches_per_step=batches_per_step[step], discriminator_train_per_gan_train=discriminator_train_per_gan_train, tensorboard_callback=tensorboard_callback)
+                self.__train_models(step=step, fade=True, image_generator=image_generator, batches_per_step=batches_per_step,
+                                    discriminator_train_per_gan_train=discriminator_train_per_gan_train,
+                                    checkpoint_save_interval=checkpoint_save_interval, tensorboard_callback=tensorboard_callback)
                 
-                self.__train_models(step=step, fade=False, image_generator=image_generator, batches_per_step=batches_per_step[step], discriminator_train_per_gan_train=discriminator_train_per_gan_train, tensorboard_callback=tensorboard_callback)
+                self.__train_models(step=step, fade=False, image_generator=image_generator, batches_per_step=batches_per_step,
+                                    discriminator_train_per_gan_train=discriminator_train_per_gan_train,
+                                    checkpoint_save_interval=checkpoint_save_interval, tensorboard_callback=tensorboard_callback)
                 
         except:
             traceback.print_exc()
         
         if tensorboard_callback is not None:
             tensorboard_callback.on_fit_end()
+    
+    def resume_fit_from_checkpoint(self, fit_checkpoint: FitCheckpoint, image_generator : ImageGenerator, tensorboard_callback=None):
+        try:
+            checkpoint_step                     = fit_checkpoint.fit_progress['step']
+            checkpoint_fade                     = fit_checkpoint.fit_progress['fade']
+            checkpoint_epoch                    = fit_checkpoint.fit_progress['epoch']
+            
+            batches_per_step                    = fit_checkpoint.fit_params['batches_per_step']
+            discriminator_train_per_gan_train   = fit_checkpoint.fit_params['discriminator_train_per_gan_train']
+            checkpoint_save_interval            = fit_checkpoint.fit_params['checkpoint_save_interval']
+            
+            image_generator.set_images_size(self.__steps[checkpoint_step])
+            
+            self.__print_fit_progress_header()
+            
+            if checkpoint_fade:
+                # resume on fade step
+                self.__train_models(step=checkpoint_step, fade=True, image_generator=image_generator, batches_per_step=(batches_per_step - checkpoint_epoch),
+                                    discriminator_train_per_gan_train=discriminator_train_per_gan_train,
+                                    checkpoint_save_interval=checkpoint_save_interval, tensorboard_callback=tensorboard_callback,
+                                    fit_checkpoint=fit_checkpoint)
+                
+                self.__train_models(step=checkpoint_step, fade=False, image_generator=image_generator, batches_per_step=batches_per_step,
+                                    discriminator_train_per_gan_train=discriminator_train_per_gan_train,
+                                    checkpoint_save_interval=checkpoint_save_interval, tensorboard_callback=tensorboard_callback)
+            else:
+                # resume on non fade step
+                self.__train_models(step=checkpoint_step, fade=False, image_generator=image_generator, batches_per_step=(batches_per_step - checkpoint_epoch),
+                                    discriminator_train_per_gan_train=discriminator_train_per_gan_train,
+                                    checkpoint_save_interval=checkpoint_save_interval, tensorboard_callback=tensorboard_callback,
+                                    fit_checkpoint=fit_checkpoint)
+
+            # proceed to next steps
+            for step in range(checkpoint_step + 1, len(self.__steps)):
+                img_size = self.__steps[step]
+                
+                image_generator.set_images_size(img_size)
+                
+                self.__train_models(step=step, fade=True, image_generator=image_generator, batches_per_step=batches_per_step,
+                                    discriminator_train_per_gan_train=discriminator_train_per_gan_train,
+                                    checkpoint_save_interval=checkpoint_save_interval, tensorboard_callback=tensorboard_callback)
+                
+                self.__train_models(step=step, fade=False, image_generator=image_generator, batches_per_step=batches_per_step,
+                                    discriminator_train_per_gan_train=discriminator_train_per_gan_train,
+                                    checkpoint_save_interval=checkpoint_save_interval, tensorboard_callback=tensorboard_callback)
+                
+        except:
+            traceback.print_exc()
+        
+        if tensorboard_callback is not None:
+            tensorboard_callback.on_fit_end()
+    
+    def save(self, path : str):
+        if not os.path.isdir(path):
+            os.mkdir(path)
+        
+        model_params = {
+            'latent_dim'        : self.__latent_dim,
+            'initial_image_size': self.__initial_image_size,
+            'final_image_size'  : self.__final_image_size,
+            'image_channels'    : self.__image_channels
+        }
+        
+        with open(os.path.join(path, 'model_params.json'), 'w') as model_params_file:
+            json.dump(model_params, model_params_file)
+        
+        for step, _ in enumerate(self.__steps):
+            for fade in (0, 1):
+                self.__generator[step][int(fade)].save_weights(os.path.join(path, f'generator_{step}_{int(fade)}.h5'))
+                self.__discriminator[step][int(fade)].save_weights(os.path.join(path, f'discriminator_{step}_{int(fade)}.h5'))
+                self.__discriminator_gp[step][int(fade)].save_weights(os.path.join(path, f'discriminator_gp_{step}_{int(fade)}.h5'))
+                self.__gan[step][int(fade)].save_weights(os.path.join(path, f'gan_{step}_{int(fade)}.h5'))
+    
+    @classmethod
+    def load(self, path : str, gan_optimizer : (str | keras.optimizers.Optimizer) ='adam', discriminator_optimizer : (str | keras.optimizers.Optimizer) ='adam'):
+        with open(os.path.join(path, 'model_params.json'), 'r') as model_params_file:
+            model_params = json.load(model_params_file)
+        
+        progan = ProgressiveGAN(model_params['latent_dim'], model_params['initial_image_size'], model_params['final_image_size'], model_params['image_channels'],
+                                gan_optimizer, discriminator_optimizer)
+            
+        for step, _ in enumerate(progan.__steps):
+            for fade in (0, 1):
+                progan.__generator[step][int(fade)].load_weights(os.path.join(path, f'generator_{step}_{int(fade)}.h5'))
+                progan.__discriminator[step][int(fade)].load_weights(os.path.join(path, f'discriminator_{step}_{int(fade)}.h5'))
+                progan.__discriminator_gp[step][int(fade)].load_weights(os.path.join(path, f'discriminator_gp_{step}_{int(fade)}.h5'))
+                progan.__gan[step][int(fade)].load_weights(os.path.join(path, f'gan_{step}_{int(fade)}.h5'))
+        
+        return progan
     
     def __set_trainable(self, model, value):
         model.trainable = value
@@ -206,7 +337,7 @@ class ProgressiveGAN(object):
     def __print_fit_progress_header(self):
         print('| image size       | step | fade | epoch            | time     | g_loss                           | d_loss                           | d_loss_generated                 | d_loss_real                      | d_loss_gradient_penalty          |', end='')
     
-    def __print_fit_progress(self, img_size, step, fade, epoch, total_epochs, g_loss, d_loss, d_loss_generated, d_loss_real, d_loss_gradient_penalty):
+    def __print_fit_progress(self, img_size, step, fade, epoch, total_epochs, alpha, g_loss, d_loss, d_loss_generated, d_loss_real, d_loss_gradient_penalty):
         if epoch == 1:
             self.__timer = perf_counter()
             print()
@@ -230,10 +361,14 @@ class ProgressiveGAN(object):
             time_str = f'{(int(time)//(60*60))%60}:{(int(time)//60)%60:02d}:{int(time)%60:02d}'
         
         img_size_str = ''
+        
+        if alpha > 0:
+            img_size = f'{alpha:.2f} '
+            
         if fade:
-            img_size_str = f'{img_size//2} -> {img_size}'
+            img_size_str += f'{img_size//2} -> {img_size}'
         else:
-            img_size_str = f'{img_size}'
+            img_size_str += f'{img_size}'
         
         epoch_str = f'{epoch} / {total_epochs}'
     
