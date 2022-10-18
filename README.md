@@ -15,3 +15,10 @@ Results for mnists dataset (32x32):</br>
 Training preview:
 </br>
 <img src="results/mnist/training.gif" alt="0" style="width:128px;"/>
+
+Results for cat's images (64x64):</br>
+<img src="results/cats/0.jpg" alt="0" style="width:128px;"/>
+<img src="results/cats/1.jpg" alt="1" style="width:128px;"/>
+<img src="results/cats/2.jpg" alt="2" style="width:128px;"/>
+<img src="results/cats/3.jpg" alt="3" style="width:128px;"/>
+<img src="results/cats/4.jpg" alt="4" style="width:128px;"/>

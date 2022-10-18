@@ -1,4 +1,5 @@
 gen/
 logs/
 model/
+fit_checkpoints/
 __pycache__
