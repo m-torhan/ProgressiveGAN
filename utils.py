@@ -4,6 +4,7 @@ import numpy as np
 
 import cv2
 
+import sys
 import os
 import datetime
 from time import sleep
@@ -44,7 +45,7 @@ class FitCheckpoint(object):
         return FitCheckpoint(fit_params, fit_progress)
 
 class ImageGenerator(object):
-    def __init__(self, images_folder_path, initial_images_size=4, batch_size=32, image_channels=3, fade=False):
+    def __init__(self, images_folder_path, initial_images_size=4, batch_size=32, image_channels=3, fade=False, preload_images=True):
         self.__images_folder_path = images_folder_path
         self.__images_size = initial_images_size
         self.__batch_size = batch_size
@@ -60,6 +61,9 @@ class ImageGenerator(object):
         self.__cached_batch = [None, None]
         self.__cached_size = [0, 0]
         self.__cached_ready = [True, True]
+        
+        self.__loaded_images = None
+        self.__loaded_images_size = 0
 
         for _, _, fnames in os.walk(self.__images_folder_path):
             for fname in fnames:
@@ -67,6 +71,11 @@ class ImageGenerator(object):
                     self.__filenames.append(fname)
             break
     
+        if preload_images:
+            self.__loaded_images = []
+            for fname in self.__filenames:
+                self.__loaded_images.append(cv2.imread(os.path.join(self.__images_folder_path, fname))[:,:,::-1])
+            
         print(f'Loaded {len(self.__filenames)} images.')
     
     @property
@@ -105,10 +114,23 @@ class ImageGenerator(object):
         img_size = self.__images_size
         result = np.zeros((self.__batch_size, img_size, img_size, self.__image_channels))
 
-        fnames = sample(self.__filenames, self.__batch_size)
+        images = None
+        fnames = None
+        if self.__loaded_images is not None:
+            images = sample(self.__loaded_images, self.__batch_size)
+        else:
+            fnames = sample(self.__filenames, self.__batch_size)
 
         for i in range(self.__batch_size):
-            img = cv2.imread(os.path.join(self.__images_folder_path, fnames[i]))[:,:,::-1]
+            img = None
+            if images is not None:
+                img = images[i]
+            elif fnames is not None:
+                img = cv2.imread(os.path.join(self.__images_folder_path, fnames[i]))[:,:,::-1]
+            else:
+                # should not happen
+                sys.exit(1)
+            
             min_size = min(img.shape[:2])
             img = img[(img.shape[0] - min_size)//2:(img.shape[0] + min_size)//2,
                       (img.shape[1] - min_size)//2:(img.shape[1] + min_size)//2]
