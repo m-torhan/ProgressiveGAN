@@ -45,7 +45,7 @@ class FitCheckpoint(object):
         return FitCheckpoint(fit_params, fit_progress)
 
 class ImageGenerator(object):
-    def __init__(self, images_folder_path, initial_images_size=4, batch_size=32, image_channels=3, fade=False, preload_images=True):
+    def __init__(self, images_folder_path, initial_images_size=4, batch_size=32, image_channels=3, fade=False, preload_images=True, preload_images_size=None):
         self.__images_folder_path = images_folder_path
         self.__images_size = initial_images_size
         self.__batch_size = batch_size
@@ -74,7 +74,11 @@ class ImageGenerator(object):
         if preload_images:
             self.__loaded_images = []
             for fname in self.__filenames:
-                self.__loaded_images.append(cv2.imread(os.path.join(self.__images_folder_path, fname))[:,:,::-1])
+                img = cv2.imread(os.path.join(self.__images_folder_path, fname))[:,:,::-1]
+                if preload_images_size is not None:
+                    img = cv2.resize(img, (preload_images_size,)*2)
+                    
+                self.__loaded_images.append(img)
             
         print(f'Loaded {len(self.__filenames)} images.')
     
